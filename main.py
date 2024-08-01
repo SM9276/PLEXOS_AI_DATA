@@ -1,78 +1,92 @@
-import json
 import os
+import ast
+import pandas as pd
 import ollama
 
-
-# Function to read the text document
-def read_text_file(file_path):
-    with open(file_path, 'r') as file:
-        content = file.read()
-    return content
+# Define the directory containing Python files
+directory = '/Users/sm9276/Plexos_AI/Extracted_Data'
 
 
-# Function to call the Ollama API for generating questions
-def generate_questions(text, model='gemma2', num_questions=5):
-    response = ollama.chat(model=model, messages=[
-        {'role': 'user', 'content': f"Generate {num_questions} questions based on the following text: {text}"}
+def read_python_files(directory):
+    code_snippets = {}
+    for filename in os.listdir(directory):
+        if filename.endswith('.py'):
+            filepath = os.path.join(directory, filename)
+            with open(filepath, 'r') as file:
+                code_snippets[filename] = file.read()
+    return code_snippets
+
+
+def generate_code_questions(code, filename):
+    questions = []
+    tree = ast.parse(code)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            func_name = node.name
+            docstring = ast.get_docstring(node)
+            questions.append((f"In file `{filename}`, what is the purpose of the `{func_name}` function?", code))
+            questions.append((
+                             f"In file `{filename}`, what are the parameters of the `{func_name}` function, and what is each used for?",
+                             code))
+            questions.append((f"In file `{filename}`, what does the `{func_name}` function return?", code))
+
+            if docstring:
+                questions.append((
+                                 f"In file `{filename}`, explain the docstring for the `{func_name}` function: \"{docstring}\"",
+                                 code))
+
+        elif isinstance(node, ast.ClassDef):
+            class_name = node.name
+            questions.append((f"In file `{filename}`, what is the purpose of the `{class_name}` class?", code))
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef):
+                    func_name = item.name
+                    questions.append((
+                                     f"In file `{filename}`, what is the purpose of the `{func_name}` method in the `{class_name}` class?",
+                                     code))
+                    docstring = ast.get_docstring(item)
+                    if docstring:
+                        questions.append((
+                                         f"In file `{filename}`, explain the docstring for the `{func_name}` method in the `{class_name}` class: \"{docstring}\"",
+                                         code))
+
+    return questions
+
+
+def get_llm_answer(question, code):
+    message = f"{question}\n\nCode:\n{code}\n\nAnswer:"
+    response = ollama.chat(model='llama3.1', messages=[
+        {'role': 'user', 'content': message},
     ])
-
-    questions_text = response['message']['content'].strip()
-    print(questions_text)
-    questions = questions_text.split('\n')
-
-    return [q.strip() for q in questions if q.strip()]
+    return response['message']['content']
 
 
-# Function to call the Ollama API for generating answers
-def generate_answer(question, text, model='gemma2'):
-    response = ollama.chat(model=model, messages=[
-        {'role': 'user',
-         'content': f"Based on the following text, provide an answer to the question: '{question}'\n\nText: {text}"}
-    ])
+def process_code_directory(directory):
+    code_snippets = read_python_files(directory)
+    qna_data = []
 
-    answer_text = response['message']['content'].strip()
-    print(answer_text)
-    return answer_text
+    for filename, code in code_snippets.items():
+        print(f"Processing file: {filename}")
+        questions = generate_code_questions(code, filename)
+        for question, code_snippet in questions:
+            answer = get_llm_answer(question, code_snippet)
+            qna_data.append({
+                'Filename': filename,
+                'Prompt': question,
+                'Code': code_snippet,
+                'Answer': answer
+            })
 
-
-# Function to save the QA pairs to a JSONL file
-def save_to_jsonl(output_folder, file_name, qa_pairs):
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-
-    output_file = os.path.join(output_folder, f"{file_name}_questions.jsonl")
-    with open(output_file, 'w') as file:
-        for qa_pair in qa_pairs:
-            prompt = qa_pair['question']
-            completion = qa_pair['answer']
-            json_line = json.dumps({"prompt": prompt, "completion": completion})
-            file.write(json_line + '\n')
-    return output_file
+    return qna_data
 
 
-# Main script
-if __name__ == "__main__":
-    input_folder = "/Users/sm9276/PycharmProjects/PLEXOS-Help-Data/Extracted_Data"  # Replace with your folder path
-    output_folder = "/Users/sm9276/PycharmProjects/PLEXOS-Help-Data/Q&A"  # Replace with your output folder path
+def save_to_excel(data, file_path):
+    df = pd.DataFrame(data)
+    df.to_excel(file_path, index=False)
 
-    # Iterate through each text file in the folder
-    for file_name in os.listdir(input_folder):
-        if file_name.endswith('.txt'):
-            file_path = os.path.join(input_folder, file_name)
 
-            # Read the input text file
-            text_content = read_text_file(file_path)
-
-            # Generate questions
-            questions = generate_questions(text_content)
-
-            # Generate answers and create QA pairs
-            qa_pairs = []
-            for question in questions[1:6]:
-                answer = generate_answer(question, text_content)
-                qa_pairs.append({"question": question, "answer": answer})
-
-            # Save the QA pairs to a JSONL file
-            jsonl_file = save_to_jsonl(output_folder, os.path.splitext(file_name)[0], qa_pairs)
-
-            print(f"QA pairs for {file_name} saved to {jsonl_file}")
+# Main process
+qna_data = process_code_directory(directory)
+save_to_excel(qna_data, 'code_qna.xlsx')
+print("Saved Q&A to 'code_qna.xlsx'")
